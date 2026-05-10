@@ -1,0 +1,1 @@
+# Custom-KQL-Detections
