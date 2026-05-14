@@ -1,0 +1,27 @@
+// Title: YellowKey BitLocker Bypass - FsTx Folder Staging
+// Description: Detects creation or modification of the 'FsTx' directory inside
+//              'System Volume Information' on any volume, the staging step required
+//              by the YellowKey BitLocker bypass (Windows 11, Server 2022/2025).
+// Author: tim@detections.ai (converted to KQL)
+// Date: 2026-05-13
+// References: https://github.com/Nightmare-Eclipse/YellowKey
+// MITRE ATT&CK: TA0001, TA0006, T1091, T1006
+DeviceFileEvents
+| where ActionType in ("FileCreated", "FileModified", "FileRenamed")
+| where isnotempty(FolderPath)
+// Match the FsTx folder or any file inside it, or any file simply named FsTx
+| where FolderPath contains @"\System Volume Information\FsTx"   // covers \FsTx\... or \FsTx
+    or FileName == "FsTx"
+// Classify the staging target for triage, following the original logic
+| extend staging_target = iif(
+    FolderPath contains @"\\?\GLOBALROOT" or FolderPath contains "EFI", "EFI_Partition",
+    iif(FolderPath matches regex "(?i)^[D-Z]:\\\\System Volume Information", "Removable_Or_Secondary_Volume",
+        "System_Volume_Information"))
+// Output fields analogous to the original XDR query
+| project Timestamp, DeviceName,
+          InitiatingProcessAccountName = InitiatingProcessAccountName, // or InitiatingProcessAccountUpn
+          InitiatingProcessFileName = InitiatingProcessFileName,
+          InitiatingProcessFolderPath,
+          InitiatingProcessCommandLine,
+          FolderPath, FileName, ActionType, staging_target
+| sort by Timestamp desc
