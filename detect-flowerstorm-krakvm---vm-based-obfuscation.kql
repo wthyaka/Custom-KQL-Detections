@@ -1,0 +1,100 @@
+// Comprehensive Detection for FlowerStorm/KrakVM PhaaS Campaign
+// Correlates: Suspicious inbound email -> HTML attachment -> MFA bypass via AiTM
+let LookbackDays = 30d;
+let EmailWindow = 24h;
+let MfaFailSuccessWindow = 2m;
+let MfaFailureCodes = dynamic([50057, 50076, 50074, 50133, 500121, 50097]); // Common MFA failures
+let SuspiciousSubjects = dynamic(["voicemail", "invoice", "vendor", "payment", "urgent", "fax", "shared document", "e-sign"]);
+// Placeholder for known IOCs – populate with Sublime's 153 IoCs
+let IoC_Domains = datatable(Domain: string)[];
+let IoC_URLs = datatable(Url: string)[];
+// 1. Suspicious inbound email with HTML attachment
+let SuspiciousEmails = EmailEvents
+    | where TimeGenerated > ago(LookbackDays)
+    | where EmailDirection == "Inbound"
+    | where DeliveryAction in ("Delivered", "Junked", "Quarantined")
+    | where Subject has_any (SuspiciousSubjects) or SenderFromAddress has_any (IoC_Domains)
+    | project
+        Timestamp = TimeGenerated,
+        NetworkMessageId,
+        RecipientEmailAddress,
+        Subject,
+        SenderFromAddress,
+        SenderDisplayName,
+        ThreatTypes,
+        DeliveryAction;
+let EmailWithAttachment = SuspiciousEmails
+    | join kind=inner (
+        EmailAttachmentInfo
+        | where FileType in ("html", "htm", "zip", "pdf")
+        | project NetworkMessageId, AttachmentName = FileName, AttachmentSHA256 = SHA256
+        )
+        on NetworkMessageId;
+// 2. Collect distinct recipients
+let Recipients = EmailWithAttachment
+    | distinct RecipientEmailAddress;
+// 3. MFA interception: failure followed by success from different IP within 2 minutes
+let Failures = SigninLogs
+    | where TimeGenerated > ago(LookbackDays)
+    | where UserPrincipalName in (Recipients)
+    | where AuthenticationRequirement == "multiFactorAuthentication"
+    | where ResultType in (MfaFailureCodes)
+    | project
+        FailureTime = TimeGenerated,
+        FailureIP = IPAddress,
+        FailureLocation = Location,
+        FailureApp = AppDisplayName,
+        FailureRiskLevel = RiskLevelDuringSignIn,
+        FailureRiskDetail = RiskDetail,
+        UserPrincipalName;
+let Successes = SigninLogs
+    | where TimeGenerated > ago(LookbackDays)
+    | where UserPrincipalName in (Recipients)
+    | where AuthenticationRequirement == "multiFactorAuthentication"
+    | where ResultType == "0"
+    | project
+        SuccessTime = TimeGenerated,
+        SuccessIP = IPAddress,
+        SuccessLocation = Location,
+        SuccessApp = AppDisplayName,
+        UserPrincipalName;
+let AnomalousSignins = Failures
+    | join kind=inner Successes on UserPrincipalName
+    | where SuccessTime between (FailureTime .. (FailureTime + MfaFailSuccessWindow))
+    | where FailureIP != SuccessIP
+    | project
+        UserPrincipalName,
+        FailureTime,
+        FailureIP,
+        SuccessTime,
+        SuccessIP,
+        FailureLocation,
+        SuccessLocation,
+        FailureApp,
+        SuccessApp,
+        FailureRiskLevel,
+        FailureRiskDetail;
+// 4. Correlate email → sign-in anomaly (only if anomaly occurred after the email)
+EmailWithAttachment
+| join kind=inner AnomalousSignins on $left.RecipientEmailAddress == $right.UserPrincipalName
+| where FailureTime > Timestamp and FailureTime < (Timestamp + EmailWindow)
+| project-rename IncidentEmailTime = Timestamp
+| project
+    Timestamp = FailureTime,
+    UserPrincipalName,
+    SenderFromAddress,
+    SenderDisplayName,
+    Subject,
+    AttachmentName,
+    AttachmentSHA256,
+    FailureIP,
+    SuccessIP,
+    FailureLocation,
+    SuccessLocation,
+    FailureApp,
+    SuccessApp,
+    FailureRiskLevel,
+    FailureRiskDetail,
+    ThreatTypes,
+    DeliveryAction
+| order by Timestamp desc
