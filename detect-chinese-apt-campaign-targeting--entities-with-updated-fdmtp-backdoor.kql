@@ -1,0 +1,59 @@
+// FDMTP Campaign - Multi-Signal Correlation Rule
+let lookback = 1d;
+let threshold = 2;
+// Signal 1: C2 Registration Beacon
+let Signal_Beacon = 
+    DeviceNetworkEvents
+    | where Timestamp > ago(lookback)
+    | where RemoteUrl has "/GetCluster?protocol=DotNet-TcpDmtp"
+    | summarize arg_max(Timestamp, *) by DeviceName
+    | project DeviceName, Timestamp, Signal = "C2RegistrationBeacon";
+// Signal 2: Staging Domain Contact (DNS or HTTP)
+let Signal_StagingDomain = 
+    DeviceNetworkEvents
+    | where Timestamp > ago(lookback)
+    | where RemoteUrl contains "yahoo-cdn.it.com"
+    | summarize arg_max(Timestamp, *) by DeviceName
+    | project DeviceName, Timestamp, Signal = "StagingDomain";
+// Signal 3: Known Malicious File Downloads
+let Signal_MaliciousFiles = 
+    DeviceNetworkEvents
+    | where Timestamp > ago(lookback)
+    | where RemoteUrl has_any ("dfsvc.exe", "dnscfg.dll", "vshost.exe",
+                               "Microsoft.VisualStudio.HostingProcess.Utilities.Sync.dll", "config.etl")
+    | summarize arg_max(Timestamp, *) by DeviceName
+    | project DeviceName, Timestamp, Signal = "MaliciousFileDownload";
+// Signal 4: Staged Payload Retrieval (.exe + .config + .dll from same IP within 10 min)
+let Signal_StagedPayload = 
+    DeviceNetworkEvents
+    | where Timestamp > ago(lookback)
+    | where RemoteUrl endswith ".exe" or RemoteUrl endswith ".config" or RemoteUrl endswith ".dll"
+    | summarize Files = make_set(RemoteUrl) by DeviceName, RemoteIP, bin(Timestamp, 10m)
+    | where Files has ".exe" and Files has ".config" and Files has ".dll"
+    | summarize arg_max(Timestamp, *) by DeviceName
+    | project DeviceName, Timestamp, Signal = "StagedPayloadRetrieval";
+// Signal 5: DLL Sideloading via Legitimate Binary
+let Signal_Sideloading = 
+    DeviceProcessEvents
+    | where Timestamp > ago(lookback)
+    | where FileName == "biz_render.exe" and ProcessCommandLine contains "browser_host.dll"
+    | summarize arg_max(Timestamp, *) by DeviceName
+    | project DeviceName, Timestamp, Signal = "DLLSideloading";
+// Signal 6: Suspicious Scheduled Task for Persistence
+let Signal_ScheduledTask = 
+    DeviceEvents
+    | where Timestamp > ago(lookback)
+    | where ActionType == "ScheduledTaskCreated"
+    | where AdditionalFields has "dfsvc.exe" and AdditionalFields has "AppData"
+    | summarize arg_max(Timestamp, *) by DeviceName
+    | project DeviceName, Timestamp, Signal = "PersistenceScheduledTask";
+// Combine all signals
+union Signal_Beacon, Signal_StagingDomain, Signal_MaliciousFiles,
+      Signal_StagedPayload, Signal_Sideloading, Signal_ScheduledTask
+| summarize Signals = make_set(Signal),
+            FirstSeen = min(Timestamp),
+            LastSeen = max(Timestamp) by DeviceName
+| extend SignalCount = array_length(Signals)
+| where SignalCount >= threshold
+| project DeviceName, SignalCount, Signals, FirstSeen, LastSeen
+| order by SignalCount desc
