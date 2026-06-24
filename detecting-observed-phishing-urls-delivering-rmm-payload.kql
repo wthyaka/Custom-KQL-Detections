@@ -1,0 +1,31 @@
+// KQL Query to detect the ScreenConnect RMM Phishing Campaign (DocuSign Theme)
+let Domains = dynamic(["vy.ijnggpi.com", "web-g63lkz.screenconnect.com"]);
+let URLs = dynamic(["hxxps://vy.ijnggpi.com/ftx/", "hxxps://web-g63lkz.screenconnect.com/Bin/ScreenConnect.ClientSetup.msi"]);
+let Hashes = dynamic(["a30a9779079dc897a15fed27f27f614fab77a20e953368808ba99ac6c6a3375b"]);
+let IPs = dynamic([]); // Add known malicious IPs here if available (e.g., resolving domains)
+
+// Detect network connections to the malicious domains or specific URL paths
+DeviceNetworkEvents
+| where Timestamp > ago(7d)
+| where RemoteUrl has_any (Domains) 
+   or RemoteUrl has_any (URLs) 
+   or RemoteIP in (IPs)
+| project Timestamp, DeviceName, RemoteUrl, RemoteIP, 
+    InitiatingProcessFileName, InitiatingProcessId, InitiatingProcessCommandLine
+| union ( 
+    // Detect process events where the file hash matches the malicious MSI
+    // OR where the command line explicitly references the domains/URLs
+    DeviceProcessEvents
+    | where Timestamp > ago(7d)
+    | where SHA256 in (Hashes)                       // The malicious MSI file itself
+       or InitiatingProcessSHA256 in (Hashes)        // Parent process is the malicious file
+       or ProcessCommandLine has_any (Domains)       // Command line contains the domain
+       or ProcessCommandLine has_any (URLs)          // Command line contains the full URL
+       or InitiatingProcessCommandLine has_any (Domains) 
+       or InitiatingProcessCommandLine has_any (URLs)
+    | project Timestamp, DeviceName, 
+        FileName, ProcessCommandLine, SHA256, 
+        InitiatingProcessFileName, InitiatingProcessSHA256, InitiatingProcessCommandLine
+)
+| project-rename EventTimestamp = Timestamp
+| order by EventTimestamp desc
