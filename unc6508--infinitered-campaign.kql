@@ -1,0 +1,164 @@
+// ============================================================
+// DETECT: UNC6508 / INFINITERED Campaign
+// Based on: https://cloud.google.com/blog/topics/threat-intelligence/prc-targets-us-medical-research
+// MITRE ATT&CK: T1190, T1505.003, T1555, T1114.003, T1048, T1071.001, T1592
+// ============================================================
+
+// ============================================================
+// 1. REDCap Web Shell & Malware Artifacts (help.php, INFINITERED)
+// ============================================================
+let RedcapArtifacts = materialize (
+    union isfuzzy=true
+    // File events – look for help.php or INFINITERED code on REDCap servers
+    (DeviceFileEvents
+    | where FolderPath has "redcap" or FileName has "redcap"
+    | where FileName == "help.php"
+        or FileContent contains "b49e334d-9c01-463e-9bc5-00a6920fb66e"
+        or FileContent contains "YjQ5ZTMzNGQtOWMwMS00NjNlLTliYzUtMDBhNjkyMGZiNjZl"
+        or FileContent contains "ej671a16i7fd8202nu6ltfg5p6x7u"
+        or FileContent contains "xc32038474a"
+        or FileContent contains "redcap_connect.php"
+        or FileContent contains "INFINITERED"
+    | extend Uri = FolderPath + FileName
+    | extend DetectionMethod = "REDCap Web Shell / INFINITERED Artifact"
+    | extend MITRE_TTP = "T1505.003"
+    | project Timestamp = TimeGenerated, SourceIP = InitiatingProcessAccountUpn, 
+              UserAgent = "", Uri, DetectionMethod, MITRE_TTP
+    ),
+    // Web request logs (if available) – look for help.php access
+    (DeviceNetworkEvents
+    | where RemoteUrl has "help.php" or RemoteUrl has "redcap"
+    | where RemoteUrl has "help.php"
+    | extend DetectionMethod = "REDCap Web Shell Access (help.php)"
+    | extend MITRE_TTP = "T1505.003"
+    | project Timestamp = TimeGenerated, SourceIP = LocalIP, 
+              UserAgent = "", Uri = RemoteUrl, DetectionMethod, MITRE_TTP
+    )
+);
+
+// ============================================================
+// 2. INFINITERED C2 Beaconing (REDCAP-TOKEN cookie)
+// ============================================================
+let InfiniteredC2 = materialize (
+    union isfuzzy=true
+    // Network logs – look for HTTP requests containing REDCAP-TOKEN
+    (DeviceNetworkEvents
+    | where RemoteUrl has "REDCAP-TOKEN"
+        or (AdditionalFields has "REDCAP-TOKEN" and AdditionalFields has "Cookie")
+    | extend DetectionMethod = "INFINITERED C2 Beacon (REDCAP-TOKEN Cookie)"
+    | extend MITRE_TTP = "T1071.001"
+    | project Timestamp = TimeGenerated, SourceIP = LocalIP, 
+              UserAgent = "", Uri = RemoteUrl, DetectionMethod, MITRE_TTP
+    ),
+    // Cloud App logs (e.g., O365, Google Workspace) – look for token in request
+    (CloudAppEvents
+    | where RawEventData has "REDCAP-TOKEN"
+    | extend DetectionMethod = "INFINITERED C2 Beacon (Cloud App)"
+    | extend MITRE_TTP = "T1071.001"
+    | project Timestamp = TimeGenerated, SourceIP = AccountUpn, 
+              UserAgent = UserAgent, Uri = "", DetectionMethod, MITRE_TTP
+    )
+);
+
+// ============================================================
+// 3. Credential Harvesting (redcap_sessions with xc32038474a)
+// ============================================================
+let CredentialHarvesting = materialize (
+    union isfuzzy=true
+    // File events – look for session files or logs containing the session prefix
+    (DeviceFileEvents
+    | where FileContent has "xc32038474a"
+        or FileContent has "encrypt($currentUTC . '[::]'"
+    | extend DetectionMethod = "INFINITERED Credential Harvesting"
+    | extend MITRE_TTP = "T1555"
+    | project Timestamp = TimeGenerated, SourceIP = InitiatingProcessAccountUpn, 
+              UserAgent = "", Uri = FolderPath + FileName, DetectionMethod, MITRE_TTP
+    ),
+    // Database audit logs (if ingested) – look for INSERT into redcap_sessions
+    (CloudAppEvents
+    | where RawEventData has "INSERT INTO redcap_sessions"
+        and RawEventData has "xc32038474a"
+    | extend DetectionMethod = "INFINITERED Credential Harvesting (DB)"
+    | extend MITRE_TTP = "T1555"
+    | project Timestamp = TimeGenerated, SourceIP = AccountUpn, 
+              UserAgent = "", Uri = "", DetectionMethod, MITRE_TTP
+    )
+);
+
+// ============================================================
+// 4. Malicious Content Compliance Rule ("Patroit") & Exfiltration
+// ============================================================
+let ComplianceExfil = materialize (
+    union isfuzzy=true
+    // Cloud Admin audit logs – look for rule creation/update with "Patroit"
+    (CloudAppEvents
+    | where ActionType in ("CreateComplianceRule", "UpdateComplianceRule")
+    | where RawEventData has "Patroit"
+    | extend DetectionMethod = "Malicious Compliance Rule (Patroit)"
+    | extend MITRE_TTP = "T1114.003"
+    | project Timestamp = TimeGenerated, SourceIP = AccountUpn, 
+              UserAgent = UserAgent, Uri = "", DetectionMethod, MITRE_TTP
+    ),
+    // Email logs – look for BCC to the attacker's Gmail
+    (EmailEvents
+    | where RecipientEmailAddress == "BebitaBarefoot774@gmail.com"
+        and EmailAction == "BCC"
+    | extend DetectionMethod = "Data Exfiltration via Compliance Rule (BCC)"
+    | extend MITRE_TTP = "T1048"
+    | project Timestamp = TimeGenerated, SourceIP = SenderFromAddress, 
+              UserAgent = "", Uri = Subject, DetectionMethod, MITRE_TTP
+    )
+);
+
+// ============================================================
+// 5. Network IOCs (domains/IPs from GTIG collection)
+// ============================================================
+let NetworkIOCs = materialize (
+    DeviceNetworkEvents
+    | where RemoteUrl in ("<INSERT_IOC_DOMAINS>")   // e.g., "infini.example.com"
+       or RemoteIP in ("<INSERT_IOC_IPS>")          // e.g., "192.0.2.123"
+    | extend DetectionMethod = "UNC6508 Network IOC"
+    | extend MITRE_TTP = "T1583"
+    | project Timestamp = TimeGenerated, SourceIP = LocalIP, 
+              UserAgent = "", Uri = RemoteUrl, DetectionMethod, MITRE_TTP
+);
+
+// ============================================================
+// 6. REDCap Legacy Probing (suspicious version scans)
+// ============================================================
+let RedcapProbing = materialize (
+    DeviceNetworkEvents
+    | where RemoteUrl has "redcap" and (RemoteUrl has "version" or RemoteUrl has "legacy")
+    | summarize Count = count(), FirstSeen = min(TimeGenerated) by LocalIP, RemoteUrl
+    | where Count > 5
+    | extend DetectionMethod = "REDCap Legacy Version Probing"
+    | extend MITRE_TTP = "T1592"
+    | project Timestamp = FirstSeen, SourceIP = LocalIP, 
+              UserAgent = "", Uri = RemoteUrl, DetectionMethod, MITRE_TTP
+);
+
+// ============================================================
+// COMBINE ALL DETECTIONS
+// ============================================================
+let AllDetections = union isfuzzy=true
+    RedcapArtifacts,
+    InfiniteredC2,
+    CredentialHarvesting,
+    ComplianceExfil,
+    NetworkIOCs,
+    RedcapProbing;
+
+// ============================================================
+// OUTPUT with severity and enrichment
+// ============================================================
+AllDetections
+| where Timestamp > ago(30d)
+| extend Severity = case(
+    DetectionMethod has "C2" or DetectionMethod has "Exfiltration" or 
+    DetectionMethod has "Credential" or DetectionMethod has "Web Shell", "High",
+    DetectionMethod has "Compliance" or DetectionMethod has "Malware", "High",
+    DetectionMethod has "Probing", "Medium",
+    "Low"
+)
+| project-reorder Timestamp, Severity, SourceIP, DetectionMethod, MITRE_TTP, Uri, UserAgent
+| sort by Timestamp desc
