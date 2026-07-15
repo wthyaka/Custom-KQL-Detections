@@ -1,0 +1,19 @@
+// Detect volumetric OAuth Client ID spoofing enumeration/spraying
+let timeframe = 1h;
+let threshold = 5; // Adjust based on your environment's baseline
+SigninLogs
+| where TimeGenerated >= ago(timeframe)
+| where isempty(AppDisplayName) and isnotempty(AppId)
+| where ResultType in ("50126", "700016")
+| summarize 
+    FailedAttempts = count(),
+    TargetedUsers = dcount(UserPrincipalName),
+    TargetedUserList = make_set(UserPrincipalName, 10),
+    UniqueSpoofedAppIDs = dcount(AppId),
+    AppIdList = make_set(AppId, 10),
+    IPAddresses = make_set(IPAddress),
+    LatestTimeGenerated = max(TimeGenerated)
+    by UserAgent, bin(TimeGenerated, timeframe)
+| where FailedAttempts >= threshold
+| project LatestTimeGenerated, TargetedUsers, UniqueSpoofedAppIDs, FailedAttempts, TargetedUserList, AppIdList, IPAddresses, UserAgent
+| sort by FailedAttempts desc
