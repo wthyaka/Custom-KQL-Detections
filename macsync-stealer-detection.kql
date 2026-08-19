@@ -1,0 +1,55 @@
+// MacSync Stealer: Comprehensive Behavioral Hunt 
+// Step 1: Get a list of all macOS DeviceIds from DeviceInfo
+let MacDevices = DeviceInfo 
+                 | where OSPlatform =~ "macOS" 
+                 | summarize arg_max(Timestamp, *) by DeviceId 
+                 | project DeviceId;
+
+let MacSyncPaths = dynamic(["/curl/", "/dynamic?txd=", "/gate?buildtxd="]);
+let MacSyncParams = dynamic(["upload_id=", "chunk_index=", "total_chunks="]);
+let MacSyncDomains = dynamic(["aihealthring.com", "cabinrentalsnc.com", "chatbasedos.com", "commercialroofingsd.com", "dogtrainersgeorgia.com", "fintelliganceai.com", "homeinspectionsdelaware.com", "intopython.com", "lalandscapelighting.com", "lumenagnet.com", "marbellaresales.com", "miamipcsupport.com", "moldinspectiondayton.com", "nailscanai.com", "newjerseypetsitter.com", "numericagent.com", "oaklandwaterdamage.com", "oklahomawarehousing.com", "olympiapetemergency.com", "peaecagent.com", "plasmaticsystems.com", "plethorawallet.com", "premierrentalpurchase.com", "ricewaterbeauty.com", "rvieragent.com", "sandiegotkd.com", "secueragent.com", "shiledagent.com", "syracusefertilitycenter.com", "vastbets.com", "wvaeagent.com"]);
+
+// Step 2: Network - Curl with MacSync behavioral pivots
+let NetworkActivity = DeviceNetworkEvents
+| where DeviceId in (MacDevices)
+| where InitiatingProcessFileName =~ "curl"
+| where RemoteUrl has_any (MacSyncPaths) or RemoteUrl has_any (MacSyncParams) or RemoteUrl has_any (MacSyncDomains)
+| extend BehaviorType = case(
+    RemoteUrl has "/curl/", "Payload Retrieval",
+    RemoteUrl has "/dynamic?txd=", "C2 Check-in",
+    RemoteUrl has "/gate?buildtxd=" or RemoteUrl has_any (MacSyncParams), "Chunked Exfiltration",
+    "Other MacSync Network Activity"
+  )
+| project Timestamp, DeviceName, BehaviorType, Table = "DeviceNetworkEvents", RemoteUrl, InitiatingProcessFileName, InitiatingProcessCommandLine;
+
+// Step 3: Process - Curl command lines with MacSync traits
+let ProcessCurl = DeviceProcessEvents
+| where DeviceId in (MacDevices)
+| where FileName =~ "curl"
+| where ProcessCommandLine has_any ("api-key", "/curl/", "/dynamic", "/gate", "--data-binary", "upload_id=", "chunk_index=", "total_chunks=", "%{http_code}", "-k -s --max-time")
+| extend BehaviorType = case(
+    ProcessCommandLine has "--data-binary" and ProcessCommandLine has "-X PUT", "Chunked Exfiltration Prep",
+    ProcessCommandLine has "/curl/", "Payload Retrieval Prep",
+    "Suspicious Curl Execution"
+  )
+| project Timestamp, DeviceName, BehaviorType, Table = "DeviceProcessEvents", FileName, ProcessCommandLine, InitiatingProcessFileName;
+
+// Step 4: Process - AppleScript (osascript) launching shell commands
+let ProcessOsascript = DeviceProcessEvents
+| where DeviceId in (MacDevices)
+| where FileName =~ "osascript"
+| where ProcessCommandLine has_any ("sh -c", "cp ", "rm ", "curl ", "mkdir ", "killall", "dscl", "base64", "gunzip")
+| extend BehaviorType = "AppleScript Assisted Execution"
+| project Timestamp, DeviceName, BehaviorType, Table = "DeviceProcessEvents", FileName, ProcessCommandLine, InitiatingProcessFileName;
+
+// Step 5: File - Staging and archiving in /tmp/
+let FileStaging = DeviceFileEvents
+| where DeviceId in (MacDevices)
+| where FolderPath has_any ("/tmp/sync", "/tmp/osalogging.zip") or FileName =~ "osalogging.zip"
+| extend BehaviorType = "Data Staging / Archiving"
+| project Timestamp, DeviceName, BehaviorType, Table = "DeviceFileEvents", ActionType, FolderPath, FileName, InitiatingProcessFileName;
+
+// Step 6: Union all behavioral indicators and sort
+union NetworkActivity, ProcessCurl, ProcessOsascript, FileStaging
+| sort by Timestamp desc, DeviceName asc
+| project Timestamp, DeviceName, BehaviorType, Table, RemoteUrl, FolderPath, FileName, ProcessCommandLine, InitiatingProcessFileName, InitiatingProcessCommandLine
