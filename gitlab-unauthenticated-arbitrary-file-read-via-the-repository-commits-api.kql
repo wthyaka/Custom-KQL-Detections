@@ -1,0 +1,25 @@
+// (Syslog/CEF ingestion of nginx access logs)
+let TraversalPatterns = dynamic([
+    "../", "%2e%2e%2f", "%2e%2e/", "..%2f",
+    "%252e%252e%252f", "%2e%2e%5c", "..%c0%af",
+    "gitlab-secrets", "gitlab.rb", "/etc/passwd", "/etc/shadow"
+]);
+union isfuzzy=true
+(
+    CommonSecurityLog
+    | project TimeGenerated, SourceIP, DestinationHostName=DeviceName,
+              RequestURL, RequestMethod, DeviceProduct
+),
+(
+    Syslog
+    | where SyslogMessage has_any (TraversalPatterns)
+    | project TimeGenerated, SourceIP=HostIP, DestinationHostName=HostName,
+              RequestURL=SyslogMessage, RequestMethod="", DeviceProduct="Syslog"
+)
+| where RequestURL has_any (TraversalPatterns)
+| summarize
+    AttemptCount   = count(),
+    DistinctURIs   = dcount(RequestURL),
+    SampleURIs     = make_set(RequestURL, 5)
+  by SourceIP, DestinationHostName, bin(TimeGenerated, 1h)
+| order by AttemptCount desc
