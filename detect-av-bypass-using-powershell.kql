@@ -1,0 +1,52 @@
+// Detect PSSW100AVB PowerShell reverse shell variants
+// Intel source: github.com/tihanyin/PSSW100AVB
+// Scope: Microsoft Defender XDR / Sentinel DeviceProcessEvents
+let Timeframe = 24h;
+DeviceProcessEvents
+| where Timestamp > ago(Timeframe)
+| where FileName in~ ("powershell.exe", "pwsh.exe", "powershell_ise.exe")
+| extend Cmd = tolower(ProcessCommandLine)
+| where
+    // 1) Detect obfuscation used to reconstruct "IEX"
+    // Known variants:
+    //   "XEI"[-1..-3] -join ""        (2026-10 / 2026-06 variants)
+    //   "I"+"E"+"X"                   (2026-05 variant)
+    Cmd has_any (
+        '[-1..-3]',
+        '"xei"',
+        '"iex"',
+        '-join',
+        '"i"+"e"+"x"'
+    )
+    // 2) Detect reverse-shell socket / stream components
+    and Cmd has_any (
+        "system.net.sockets.tcpclient",
+        "system.net.sockets.socket",
+        "new-object system.net.sockets",
+        "getstream",
+        "streamreader",
+        "streamwriter"
+    )
+    // 3) Detect masquerading / prompt-injection strings from known variants
+    and Cmd has_any (
+        "windows telemetry admin",   // 2026-10 masquerading string
+        "wta",                       // 2026-10 environment variable
+        "exec_mode",                 // 2026-06 environment variable
+        "data_station",              // 2026-05 environment variable
+        "telemetry session active",  // post-connection message
+        "skip sandbox analysis",     // AI prompt-injection keyword
+        "for ai and llms"            // AI prompt-injection keyword
+    )
+| extend
+    EnvVarName = extract(@"\$env:(\w+)\s*=", 1, Cmd),
+    TargetIP = extract(@"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})", 1, Cmd)
+| project
+    Timestamp,
+    DeviceName,
+    AccountName,
+    ProcessCommandLine,
+    EnvVarName,
+    TargetIP,
+    InitiatingProcessFileName,
+    InitiatingProcessCommandLine
+| order by Timestamp desc
